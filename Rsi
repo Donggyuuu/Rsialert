@@ -1,0 +1,88 @@
+import ccxt
+import pandas as pd
+import pandas_ta as ta
+import requests
+import os
+from datetime import datetime
+
+TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN')
+TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID')
+TARGET_SYMBOL = "BTC/USDT:USDT"
+
+def send_telegram_message(message):
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": TELEGRAM_CHAT_ID, 
+        "text": message, 
+        "parse_mode": "Markdown"
+    }
+    try:
+        requests.post(url, json=payload)
+    except Exception as e:
+        print(f"텔레그램 전송 오류: {e}")
+
+exchange = ccxt.okx()
+
+def run():
+    print(f"[{datetime.now()}] OKX 시장 데이터 분석 시작...")
+    try:
+        timeframes = ['15m', '1h', '4h']
+        data = {}
+        
+        for tf in timeframes:
+            ohlcv = exchange.fetch_ohlcv(TARGET_SYMBOL, timeframe=tf, limit=100)
+            df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+            df['rsi'] = ta.rsi(df['close'], length=14)
+            data[tf] = df
+
+        df_4h = data['4h']
+        latest_4h = df_4h.iloc[-1]
+        prev_4h_vol_avg = df_4h['volume'].iloc[-21:-1].mean()
+        current_4h_volume = latest_4h['volume']
+        
+        is_volume_spike = current_4h_volume >= (prev_4h_vol_avg * 3.0)
+        
+        body = abs(latest_4h['close'] - latest_4h['open'])
+        if body == 0: 
+            body = 0.00001 
+            
+        upper_wick = latest_4h['high'] - max(latest_4h['open'], latest_4h['close'])
+        lower_wick = min(latest_4h['open'], latest_4h['close']) - latest_4h['low']
+        
+        rsi_15m = data['15m'].iloc[-1]['rsi']
+        rsi_1h = data['1h'].iloc[-1]['rsi']
+        rsi_4h = data['4h'].iloc[-1]['rsi']
+        
+        cascade_alert = None
+        if is_volume_spike and (lower_wick >= body * 2.0) and (rsi_15m <= 30):
+            cascade_alert = "🔥 **[강한 신호] 롱 청산 캐스케이드 포착 (아래꼬리 쓸어담기)**"
+        elif is_volume_spike and (upper_wick >= body * 2.0) and (rsi_15m >= 70):
+            cascade_alert = "🔥 **[강한 신호] 숏 청산 캐스케이드 포착 (위꼬리 숏 털기)**"
+
+        is_rsi_extreme = (rsi_4h <= 30) or (rsi_4h >= 70)
+        
+        if cascade_alert or is_rsi_extreme:
+            msg = f"📊 **[OKX 트레이딩 알림]**\n"
+            msg += f"• **종목:** `{TARGET_SYMBOL}`\n\n"
+            msg += f"• **멀티 타임프레임 RSI**\n"
+            msg += f"  - 15분: `{rsi_15m:.1f}` | 1시간: `{rsi_1h:.1f}` | 4시간: `{rsi_4h:.1f}`\n\n"
+            msg += f"• **4H 거래량:** 평균 대비 `{current_4h_volume / prev_4h_vol_avg:.1f}배`"
+            if is_volume_spike: 
+                msg += " ⚠️ *(거래량 폭발)*"
+            
+            if cascade_alert:
+                msg += f"\n\n{cascade_alert}\n👉 *차트를 열고 기계적으로 대응하세요!*"
+            
+            send_telegram_message(msg)
+            print("조건 충족: 텔레그램 알림 전송 완료")
+        else:
+            print("조건에 맞는 시그널 없음.")
+
+    except Exception as e:
+        print(f"오류 발생: {e}")
+
+if __name__ == "__main__":
+    run()
+
+
+
